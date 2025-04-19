@@ -206,3 +206,28 @@ def get_rays_torch(H, W, K, R, T, perturb=False):
     rays_o = rays_o.expand_as(rays_d)
     return rays_o, rays_d
 
+
+def batch_quaternion_multiply(q1, q2):
+    """
+    Multiply batches of quaternions.
+    
+    Args:
+    - q1 (torch.Tensor): A tensor of shape [N, 4] representing the first batch of quaternions.
+    - q2 (torch.Tensor): A tensor of shape [N, 4] representing the second batch of quaternions.
+    
+    Returns:
+    - torch.Tensor: The resulting batch of quaternions after applying the rotation.
+    """
+    # Calculate the product of each quaternion in the batch
+    w = q1[:, 0] * q2[:, 0] - q1[:, 1] * q2[:, 1] - q1[:, 2] * q2[:, 2] - q1[:, 3] * q2[:, 3]
+    x = q1[:, 0] * q2[:, 1] + q1[:, 1] * q2[:, 0] + q1[:, 2] * q2[:, 3] - q1[:, 3] * q2[:, 2]
+    y = q1[:, 0] * q2[:, 2] - q1[:, 1] * q2[:, 3] + q1[:, 2] * q2[:, 0] + q1[:, 3] * q2[:, 1]
+    z = q1[:, 0] * q2[:, 3] + q1[:, 1] * q2[:, 2] - q1[:, 2] * q2[:, 1] + q1[:, 3] * q2[:, 0]
+
+    # Combine into new quaternions
+    q3 = torch.stack((w, x, y, z), dim=1)
+    
+    # Normalize the quaternions
+    norm_q3 = q3 / torch.norm(q3, dim=1, keepdim=True)
+    
+    return norm_q3

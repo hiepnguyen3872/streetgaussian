@@ -28,7 +28,7 @@ def run_colmap_waymo(result):
     data_path = cfg.source_path
     colmap_dir = os.path.join(model_path, 'colmap')
     os.makedirs(colmap_dir, exist_ok=True)
-    print('runing colmap, colmap dir: ', colmap_dir)
+    print('running colmap, colmap dir: ', colmap_dir)
 
     unique_cams = sorted(list(set(result['cams'])))
     print('cameras: ', unique_cams)
@@ -129,7 +129,6 @@ def run_colmap_waymo(result):
             'img_h': img_h,
             'img_w': img_w,
         }
-
     # load id_names from database
     db = f'{colmap_dir}/database.db'
     conn = sqlite3.connect(db)
@@ -210,7 +209,6 @@ def run_colmap_waymo(result):
         cam = image_filename_to_cam(name)
         cam_id = i[2]
         cam_to_id[cam] = cam_id
-    
     for unique_cam in unique_cams:
         cam_id = cam_to_id[unique_cam]
         ixt = camera_infos[unique_cam]['ixt']

@@ -23,16 +23,31 @@ class Dataset():
 
         self.train_cameras = {}
         self.test_cameras = {}
-
+        self.pseudo_train_cameras = {}
         dataset_type = cfg.data.get('type', "Colmap")
         assert dataset_type in sceneLoadTypeCallbacks.keys(), 'Could not recognize scene type!'
         
         scene_info: SceneInfo = sceneLoadTypeCallbacks[dataset_type](self.source_path, **cfg.data)
+        # if cfg.mode == 'train':
+        #     print(f'Saving input pointcloud to {os.path.join(self.model_path, "input.ply")}')
+        #     pcd = scene_info.point_cloud
+        #     storePly(os.path.join(self.model_path, "input.ply"), pcd.points, pcd.colors)
 
-        if cfg.mode == 'train':
+        #     json_cams = []
+        #     camlist = []
+        #     if scene_info.test_cameras:
+        #         camlist.extend(scene_info.test_cameras)
+        #     if scene_info.train_cameras:
+        #         camlist.extend(scene_info.train_cameras)
+        #     for id, cam in enumerate(camlist):
+        #         json_cams.append(camera_to_JSON(id, cam))
+
+        #     print(f'Saving input camera to {os.path.join(self.model_path, "cameras.json")}')
+        #     with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
+        #         json.dump(json_cams, file)
+
+        if True:
             print(f'Saving input pointcloud to {os.path.join(self.model_path, "input.ply")}')
-            pcd = scene_info.point_cloud
-            storePly(os.path.join(self.model_path, "input.ply"), pcd.points, pcd.colors)
 
             json_cams = []
             camlist = []
@@ -40,6 +55,7 @@ class Dataset():
                 camlist.extend(scene_info.test_cameras)
             if scene_info.train_cameras:
                 camlist.extend(scene_info.train_cameras)
+
             for id, cam in enumerate(camlist):
                 json_cams.append(camera_to_JSON(id, cam))
 
@@ -58,4 +74,6 @@ class Dataset():
             self.train_cameras[resolution_scale] = cameraList_from_camInfos(self.scene_info.train_cameras, resolution_scale)
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(self.scene_info.test_cameras, resolution_scale)
+            print("Loading Pseudo Training Cameras")
+            self.pseudo_train_cameras[resolution_scale] = cameraList_from_camInfos(self.scene_info.pseudo_train_cameras, resolution_scale)
             

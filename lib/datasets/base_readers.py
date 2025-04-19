@@ -18,11 +18,34 @@ class CameraInfo(NamedTuple):
     metadata: dict = dict()
     mask: np.array = None
     acc_mask: np.array = None
-            
+    raw_time: int = None
+    time: float = None
+
+class PseudoCameraInfo(CameraInfo): 
+    uid: int
+    R: np.array
+    T: np.array
+    FovY: np.array
+    FovX: np.array
+    K: np.array
+    image_t1: np.array
+    image_t2: np.array
+    image_path: str
+    image_name: str
+    width: int
+    height: int
+    metadata: dict = dict()
+    mask: np.array = None
+    acc_mask: np.array = None
+    raw_time: int = None
+    time: float = None
+    
+    
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
     test_cameras: list
+    pseudo_train_cameras: list
     nerf_normalization: dict
     ply_path: str
     metadata: dict = dict()

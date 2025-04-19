@@ -24,5 +24,13 @@ def mkdir_p(folder_path):
             raise
 
 def searchForMaxIteration(folder):
-    saved_iters = [int(fname.split('.')[0].split("_")[-1]) for fname in os.listdir(folder)]
+    saved_iters = [
+        int(fname.split('.')[0].split("_")[-1]) 
+        for fname in os.listdir(folder) 
+        if 'deformation' not in fname
+    ] + [
+        int(fname.split('.')[0].split("_")[1]) 
+        for fname in os.listdir(folder) 
+        if 'deformation' in fname
+    ]
     return max(saved_iters)

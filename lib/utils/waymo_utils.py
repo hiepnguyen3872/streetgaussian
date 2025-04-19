@@ -14,6 +14,9 @@ from lib.utils.data_utils import get_val_frames
 from lib.utils.graphics_utils import get_rays, sphere_intersection
 from lib.utils.general_utils import matrix_to_quaternion, quaternion_to_matrix_numpy
 from lib.datasets.base_readers import storePly, get_Sphere_Norm
+from PIL import Image
+from lib.utils.loss_utils import get_dynamic_mask
+import cv2
 
 waymo_track2label = {"vehicle": 0, "pedestrian": 1, "cyclist": 2, "sign": 3, "misc": -1}
 
@@ -175,6 +178,7 @@ def get_obj_pose_tracking(datadir, selected_frames, ego_poses, cameras=[0, 1, 2,
     visible_objects_ids = np.ones([num_frames, max_obj_per_frame]) * -1.0
     visible_objects_pose_vehicle = np.ones([num_frames, max_obj_per_frame, 7]) * -1.0
     visible_objects_pose_world = np.ones([num_frames, max_obj_per_frame, 7]) * -1.0
+
     
     # Iterate through the tracklets and process object data
     for tracklet in tracklets_array:
@@ -341,7 +345,6 @@ def generate_dataparser_outputs(
         
     for frame in range(start_frame, end_frame+1):
         frames_timestamps.append(timestamps['FRAME'][f'{frame:06d}'])
-    
     for image_filename in image_filenames_all:
         image_basename = os.path.basename(image_filename)
         frame = image_filename_to_frame(image_basename)
@@ -349,6 +352,12 @@ def generate_dataparser_outputs(
         if frame >= start_frame and frame <= end_frame and cam in cameras:
             ixt = intrinsics[cam]
             ext = extrinsics[cam]
+
+            # change to bev
+            # ext[:3, :3] = np.array([[1, 0, 0],[0, 0, -1],[0, 1, 0]])
+            # ext[:3, :3] = np.array([[1, 0, 0],[0, 1, 0],[0, 0, -1]])
+            # ext[2, 3] = 20
+
             pose = ego_cam_poses[cam, frame]
             c2w = pose @ ext
 
@@ -443,29 +452,34 @@ def generate_dataparser_outputs(
     #     x = x.astype(np.uint8) * 255
     #     cv2.imwrite(f'obj_bounds/{i}.png', x)
     
-    # run colmap
-    colmap_basedir = os.path.join(f'{cfg.model_path}/colmap')
-    if not os.path.exists(os.path.join(colmap_basedir, 'triangulated/sparse/model')):
-        from script.waymo.colmap_waymo_full import run_colmap_waymo
-        run_colmap_waymo(result)
     
+    # build_pointcloud = True
     if build_pointcloud:
+        
+        # run colmap
+        # colmap_basedir = os.path.join(f'{cfg.model_path}/colmap')
+        # if not os.path.exists(os.path.join(colmap_basedir, 'triangulated/sparse/model')):
+        #     from script.waymo.colmap_waymo_full import run_colmap_waymo
+        #     run_colmap_waymo(result)
         print('build point cloud')
         pointcloud_dir = os.path.join(cfg.model_path, 'input_ply')
         os.makedirs(pointcloud_dir, exist_ok=True)
         
         points_xyz_dict = dict()
         points_rgb_dict = dict()
+        points_seg_dict = dict()
         points_xyz_dict['bkgd'] = []
         points_rgb_dict['bkgd'] = []
+        points_seg_dict['bkgd'] = []
+
         for track_id in object_info.keys():
             points_xyz_dict[f'obj_{track_id:03d}'] = []
             points_rgb_dict[f'obj_{track_id:03d}'] = []
 
         print('initialize from sfm pointcloud')
-        points_colmap_path = os.path.join(colmap_basedir, 'triangulated/sparse/model/points3D.bin')
-        points_colmap_xyz, points_colmap_rgb, points_colmap_error = read_points3D_binary(points_colmap_path)
-        points_colmap_rgb = points_colmap_rgb / 255.
+        # points_colmap_path = os.path.join(colmap_basedir, 'triangulated/sparse/model/points3D.bin')
+        # points_colmap_xyz, points_colmap_rgb, points_colmap_error = read_points3D_binary(points_colmap_path)
+        # points_colmap_rgb = points_colmap_rgb / 255.
                      
         print('initialize from lidar pointcloud')
         pointcloud_path = os.path.join(datadir, 'pointcloud.npz')
@@ -473,6 +487,11 @@ def generate_dataparser_outputs(
         pts2d_dict = np.load(pointcloud_path, allow_pickle=True)['camera_projection'].item()
 
         for i, frame in tqdm(enumerate(range(start_frame, end_frame+1))):
+            # aggregate sparse frames
+            # if i % 20 != 0: 
+            #     continue
+            # if i > 0: 
+            #     continue
             idxs = list(range(i * num_cameras, (i+1) * num_cameras))
             cams_frame = [cams[idx] for idx in idxs]
             image_filenames_frame = [image_filenames[idx] for idx in idxs]
@@ -500,10 +519,11 @@ def generate_dataparser_outputs(
             points_xyz_world = points_xyz_vehicle @ ego_pose.T
             
             points_rgb = np.ones_like(points_xyz_vehicle[:, :3])
+            points_seg = np.ones_like(points_xyz_vehicle[:, :1])
             points_camera = points_camera_all[mask]
             points_projw = points_projw_all[mask]
             points_projh = points_projh_all[mask]
-
+            
             for cam, image_filename in zip(cams_frame, image_filenames_frame):
                 mask_cam = (points_camera == cam)
                 image = cv2.imread(image_filename)[..., [2, 1, 0]] / 255.
@@ -512,38 +532,60 @@ def generate_dataparser_outputs(
                 mask_projh = points_projh[mask_cam]
                 mask_rgb = image[mask_projh, mask_projw]
                 points_rgb[mask_cam] = mask_rgb
-        
+    
+                if True: 
+                    image_dir = os.path.dirname(image_filename)
+                    image_name = os.path.basename(image_filename) # "id.png"
+                    image_name = image_name.split('.')[0] # 'id'
+                    data_dir = os.path.dirname(image_dir)
+                    pseudo_seg_filename = os.path.join(data_dir, "pseudo_segs", f'{image_name}.png')
+                    seg_map = np.array(Image.open(pseudo_seg_filename))
+                    seg_map = cv2.resize(seg_map, (image_widths[cam], image_heights[cam]), interpolation=cv2.INTER_NEAREST)
+                    mask_seg = seg_map[mask_projh, mask_projw]
+                    points_seg[mask_cam] = np.expand_dims(mask_seg, axis = 1)
+                    seg_map = torch.tensor(seg_map, device='cuda' if torch.cuda.is_available() else 'cpu')
+                    dynamic_mask = get_dynamic_mask(seg_map)
+                    points_xyz_dynamic_mask = dynamic_mask[mask_projh, mask_projw].cpu().numpy()
+                    if cfg.model.nsg.use_deformation_model:
+                        points_xyz_dynamic_mask = ~points_xyz_dynamic_mask
             # filer points in tracking bbox
             points_xyz_obj_mask = np.zeros(points_xyz_vehicle.shape[0], dtype=np.bool_)
+            
+            if cfg.data.mask_lidar_dynamic_object: 
+                for tracklet in object_tracklets_vehicle[i]:
+                    track_id = int(tracklet[0])
+                    if track_id >= 0:
+                        obj_pose_vehicle = np.eye(4)                    
+                        obj_pose_vehicle[:3, :3] = quaternion_to_matrix_numpy(tracklet[4:8])
+                        obj_pose_vehicle[:3, 3] = tracklet[1:4]
+                        vehicle2local = np.linalg.inv(obj_pose_vehicle)
+                        
+                        points_xyz_obj = points_xyz_vehicle @ vehicle2local.T
+                        points_xyz_obj = points_xyz_obj[..., :3]
+                        
+                        length = object_info[track_id]['length']
+                        width = object_info[track_id]['width']
+                        height = object_info[track_id]['height']
+                        bbox = [[-length/2, -width/2, -height/2], [length/2, width/2, height/2]]
+                        obj_corners_3d_local = bbox_to_corner3d(bbox)
+                        
+                        points_xyz_inbbox = inbbox_points(points_xyz_obj, obj_corners_3d_local)
+                        points_xyz_obj_mask = np.logical_or(points_xyz_obj_mask, points_xyz_inbbox)
+                        points_xyz_dict[f'obj_{track_id:03d}'].append(points_xyz_obj[points_xyz_inbbox])
+                        points_rgb_dict[f'obj_{track_id:03d}'].append(points_rgb[points_xyz_inbbox])
 
-            for tracklet in object_tracklets_vehicle[i]:
-                track_id = int(tracklet[0])
-                if track_id >= 0:
-                    obj_pose_vehicle = np.eye(4)                    
-                    obj_pose_vehicle[:3, :3] = quaternion_to_matrix_numpy(tracklet[4:8])
-                    obj_pose_vehicle[:3, 3] = tracklet[1:4]
-                    vehicle2local = np.linalg.inv(obj_pose_vehicle)
-                    
-                    points_xyz_obj = points_xyz_vehicle @ vehicle2local.T
-                    points_xyz_obj = points_xyz_obj[..., :3]
-                    
-                    length = object_info[track_id]['length']
-                    width = object_info[track_id]['width']
-                    height = object_info[track_id]['height']
-                    bbox = [[-length/2, -width/2, -height/2], [length/2, width/2, height/2]]
-                    obj_corners_3d_local = bbox_to_corner3d(bbox)
-                    
-                    points_xyz_inbbox = inbbox_points(points_xyz_obj, obj_corners_3d_local)
-                    points_xyz_obj_mask = np.logical_or(points_xyz_obj_mask, points_xyz_inbbox)
-                    points_xyz_dict[f'obj_{track_id:03d}'].append(points_xyz_obj[points_xyz_inbbox])
-                    points_rgb_dict[f'obj_{track_id:03d}'].append(points_rgb[points_xyz_inbbox])
-        
+            # if cfg.nsg.use_deformation_model:
+            points_xyz_obj_mask = np.logical_or(points_xyz_obj_mask, points_xyz_dynamic_mask)
             points_lidar_xyz = points_xyz_world[~points_xyz_obj_mask][..., :3]
             points_lidar_rgb = points_rgb[~points_xyz_obj_mask]
-            
+            points_lidar_seg = points_seg[~points_xyz_obj_mask]
+
+            # Only use lidar in first frame to initialize 3dgs
+            # if i == 0: 
             points_xyz_dict['bkgd'].append(points_lidar_xyz)
             points_rgb_dict['bkgd'].append(points_lidar_rgb)
-            
+            points_seg_dict['bkgd'].append(points_lidar_seg)
+                
         initial_num_obj = 20000
 
         for k, v in points_xyz_dict.items():
@@ -552,6 +594,7 @@ def generate_dataparser_outputs(
             else:
                 points_xyz = np.concatenate(v, axis=0)
                 points_rgb = np.concatenate(points_rgb_dict[k], axis=0)
+                # points_seg = np.concatenate(points_rgb_dict[k], axis=0)
                 if k == 'bkgd':
                     # downsample lidar pointcloud with voxels
                     points_lidar = o3d.geometry.PointCloud()
@@ -586,35 +629,37 @@ def generate_dataparser_outputs(
         sphere_radius = lidar_sphere_normalization['radius']
 
         # combine SfM pointcloud with LiDAR pointcloud
-        try:
-            if cfg.data.filter_colmap:
-                points_colmap_mask = np.ones(points_colmap_xyz.shape[0], dtype=np.bool_)
-                for i, ext in enumerate(exts):
-                    # if frames_idx[i] not in train_frames:
-                    #     continue
-                    camera_position = c2ws[i][:3, 3]
-                    radius = np.linalg.norm(points_colmap_xyz - camera_position, axis=-1)
-                    mask = np.logical_or(radius < cfg.data.get('extent', 10), points_colmap_xyz[:, 2] < camera_position[2])
-                    points_colmap_mask = np.logical_and(points_colmap_mask, ~mask)        
-                points_colmap_xyz = points_colmap_xyz[points_colmap_mask]
-                points_colmap_rgb = points_colmap_rgb[points_colmap_mask]
+        # try:
+        #     if cfg.data.filter_colmap:
+        #         points_colmap_mask = np.ones(points_colmap_xyz.shape[0], dtype=np.bool_)
+        #         for i, ext in enumerate(exts):
+        #             # if frames_idx[i] not in train_frames:
+        #             #     continue
+        #             camera_position = c2ws[i][:3, 3]
+        #             radius = np.linalg.norm(points_colmap_xyz - camera_position, axis=-1)
+        #             mask = np.logical_or(radius < cfg.data.get('extent', 10), points_colmap_xyz[:, 2] < camera_position[2])
+        #             points_colmap_mask = np.logical_and(points_colmap_mask, ~mask)        
+        #         points_colmap_xyz = points_colmap_xyz[points_colmap_mask]
+        #         points_colmap_rgb = points_colmap_rgb[points_colmap_mask]
             
-            points_colmap_dist = np.linalg.norm(points_colmap_xyz - sphere_center, axis=-1)
-            mask = points_colmap_dist < 2 * sphere_radius
-            points_colmap_xyz = points_colmap_xyz[mask]
-            points_colmap_rgb = points_colmap_rgb[mask]
+        #     points_colmap_dist = np.linalg.norm(points_colmap_xyz - sphere_center, axis=-1)
+        #     mask = points_colmap_dist < 2 * sphere_radius
+        #     points_colmap_xyz = points_colmap_xyz[mask]
+        #     points_colmap_rgb = points_colmap_rgb[mask]
         
-            points_bkgd_xyz = np.concatenate([points_lidar_xyz, points_colmap_xyz], axis=0) 
-            points_bkgd_rgb = np.concatenate([points_lidar_rgb, points_colmap_rgb], axis=0)
-        except:
-            print('No colmap pointcloud')
-            points_bkgd_xyz = points_lidar_xyz
-            points_bkgd_rgb = points_lidar_rgb
+        #     points_bkgd_xyz = np.concatenate([points_lidar_xyz, points_colmap_xyz], axis=0) 
+        #     points_bkgd_rgb = np.concatenate([points_lidar_rgb, points_colmap_rgb], axis=0)
+        # except:
+        #     print('No colmap pointcloud')
+        #     points_bkgd_xyz = points_lidar_xyz
+        #     points_bkgd_rgb = points_lidar_rgb
+        points_bkgd_xyz = points_lidar_xyz
+        points_bkgd_rgb = points_lidar_rgb
         
         points_xyz_dict['lidar'] = points_lidar_xyz
         points_rgb_dict['lidar'] = points_lidar_rgb
-        points_xyz_dict['colmap'] = points_colmap_xyz
-        points_rgb_dict['colmap'] = points_colmap_rgb
+        # points_xyz_dict['colmap'] = points_colmap_xyz
+        # points_rgb_dict['colmap'] = points_colmap_rgb
         points_xyz_dict['bkgd'] = points_bkgd_xyz
         points_rgb_dict['bkgd'] = points_bkgd_rgb
             

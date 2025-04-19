@@ -24,6 +24,7 @@ from PIL import Image
 from tqdm import tqdm
 from lib.utils.graphics_utils import focal2fov
 from lib.datasets.base_readers import CameraInfo
+import open3d as o3d
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
@@ -390,3 +391,15 @@ def quaternion_to_axis_angle(quaternions: torch.Tensor) -> torch.Tensor:
         0.5 - (angles[small_angles] * angles[small_angles]) / 48
     )
     return quaternions[..., 1:] / sin_half_angles_over_angles
+
+def o3d_knn(pts, num_knn):
+    indices = []
+    sq_dists = []
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(np.ascontiguousarray(pts, np.float64))
+    pcd_tree = o3d.geometry.KDTreeFlann(pcd)
+    for p in pcd.points:
+        [_, i, d] = pcd_tree.search_knn_vector_3d(p, num_knn + 1)
+        indices.append(i[1:])
+        sq_dists.append(d[1:])
+    return np.array(sq_dists), np.array(indices)

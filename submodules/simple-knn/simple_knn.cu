@@ -14,6 +14,7 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include "simple_knn.h"
+#include <cfloat>
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
 #include <vector>
@@ -211,6 +212,7 @@ void SimpleKNN::knn(int P, float3* points, float* meanDists)
 	temp_storage.resize(temp_storage_bytes);
 
 	cub::DeviceRadixSort::SortPairs(temp_storage.data().get(), temp_storage_bytes, morton.data().get(), morton_sorted.data().get(), indices.data().get(), indices_sorted.data().get(), P);
+
 	uint32_t num_boxes = (P + BOX_SIZE - 1) / BOX_SIZE;
 	thrust::device_vector<MinMax> boxes(num_boxes);
 	boxMinMax << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get());

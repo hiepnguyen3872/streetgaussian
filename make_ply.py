@@ -78,3 +78,5 @@ if __name__ == '__main__':
     elements = PlyElement.describe(elements, 'vertex')
     PlyData([elements]).write(os.path.join(pointcloud_dir, 'point_cloud.ply'))
     
+
+# python make_ply.py --config configs/experiments_waymo/waymo_val_006.yaml viewer.frame_id 0 mode evaluate

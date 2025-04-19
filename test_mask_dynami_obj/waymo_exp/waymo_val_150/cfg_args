@@ -1,0 +1,1 @@
+Namespace(model_path='/home/ml4u/BKTeam/TheHiep/street_gaussians/test_mask_dynami_obj/waymo_exp/waymo_val_150', sh_degree=1, source_path='/media/ml4u/ExtremeSSD/datasets/waymo/processed/150', white_background=False)

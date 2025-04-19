@@ -18,6 +18,8 @@ from lib.models.gaussian_model import GaussianModel
 from lib.models.gaussian_model_bkgd import GaussianModelBkgd
 from lib.models.gaussian_model_actor import GaussianModelActor
 from lib.models.gaussian_model_sky import GaussinaModelSky
+from lib.models.gaussian_model_deformation import GaussianModelDeformable
+from lib.models.gaussian_model_pvg import GaussianModelPVG
 from bidict import bidict
 from lib.utils.camera_utils import Camera
 from lib.utils.sh_utils import eval_sh
@@ -25,6 +27,7 @@ from lib.models.actor_pose import ActorPose
 from lib.models.sky_cubemap import SkyCubeMap
 from lib.models.color_correction import ColorCorrection
 from lib.models.camera_pose import PoseCorrection
+from lib.models.deformation.deformation import deform_network
 
 class StreetGaussianModel(nn.Module):
     def __init__(self, metadata):
@@ -36,7 +39,11 @@ class StreetGaussianModel(nn.Module):
 
         # background + moving objects
         self.include_background = cfg.model.nsg.get('include_bkgd', True)
+        self.include_pvg = cfg.model.nsg.get('include_pvg', True)
+
         self.include_obj = cfg.model.nsg.get('include_obj', True)
+        self.use_deformation_model = cfg.model.nsg.get('use_deformation_model', True)
+        print('include_obj: ', self.include_obj)
         
         # sky (modeling sky with gaussians, if set to false represent the sky with cube map)
         self.include_sky = cfg.model.nsg.get('include_sky', False) 
@@ -59,6 +66,9 @@ class StreetGaussianModel(nn.Module):
         self.flip_matrix = torch.eye(3).float().cuda() * -1
         self.flip_matrix[self.flip_axis, self.flip_axis] = 1
         self.flip_matrix = matrix_to_quaternion(self.flip_matrix.unsqueeze(0))
+        # if cfg.model.deformable_gaussian: 
+        #     self._deformation = deform_network(cfg)
+        #     self._deformation_table = torch.empty(0)
         self.setup_functions() 
     
     def set_visibility(self, include_list):
@@ -69,6 +79,11 @@ class StreetGaussianModel(nn.Module):
             if model_name in self.include_list and self.include_background:
                 return True
             else:
+                return False
+        elif model_name == 'pvg': 
+            if model_name in self.include_list and self.include_pvg:
+                return True
+            else: 
                 return False
         elif model_name == 'sky':
             if model_name in self.include_list and self.include_sky:
@@ -84,9 +99,15 @@ class StreetGaussianModel(nn.Module):
             raise ValueError(f'Unknown model name {model_name}')
                 
     def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float):
+        # if cfg.model.deformable_gaussian: 
+        #     self._deformation = self._deformation.to("cuda") 
+        #     self._deformation_table = torch.gt(torch.ones((self.get_xyz.shape[0]),device="cuda"),0)
         for model_name in self.model_name_id.keys():
-            model: GaussianModel = getattr(self, model_name)
-            if model_name in ['background', 'sky']:
+            if model_name in ['pvg', 'background']:
+                model: GaussianModel = getattr(self, 'background')
+            else: 
+                model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg', 'sky']:
                 model.create_from_pcd(pcd, spatial_lr_scale)
             else:
                 model.create_from_pcd(spatial_lr_scale)
@@ -97,7 +118,10 @@ class StreetGaussianModel(nn.Module):
         plydata_list = []
         for i in range(self.models_num):
             model_name = self.model_name_id.inverse[i]
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             plydata = model.make_ply()
             plydata = PlyElement.describe(plydata, f'vertex_{model_name}')
             plydata_list.append(plydata)
@@ -110,23 +134,55 @@ class StreetGaussianModel(nn.Module):
             model_name = plydata.name[7:] # vertex_.....
             if model_name in self.model_name_id.keys():
                 print('Loading model', model_name)
-                model: GaussianModel = getattr(self, model_name)
+                if model_name in ['background', 'pvg']: 
+                    model: GaussianModel = getattr(self, 'background')
+                else:
+                    model: GaussianModel = getattr(self, model_name)
                 model.load_ply(path=None, input_ply=plydata)
                 plydata_list = PlyData.read(path).elements
                 
         self.active_sh_degree = self.max_sh_degree
   
-    def load_state_dict(self, state_dict, exclude_list=[]):
+    def load_state_dict(self, trained_model_dir, loaded_iter, exclude_list=[]):
+        print("Loading checkpoint at iteration {}".format(loaded_iter))
+        checkpoint_path = os.path.join(trained_model_dir, f"iteration_{str(loaded_iter)}.pth")
+        assert os.path.exists(checkpoint_path)
+        print("Loading checkpoint at {}".format(checkpoint_path))
+        state_dict = torch.load(checkpoint_path)
+        print(f'Loading background model from {checkpoint_path}')
         for model_name in self.model_name_id.keys():
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
-            model.load_state_dict(state_dict[model_name])
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
+            if model_name == 'background' and cfg.model.nsg.use_deformation_model:
+                model.load_state_dict(state_dict[model_name], trained_model_dir, loaded_iter)
+            elif model_name == 'pvg':
+                (model_params, first_iter) = torch.load(checkpoint_path)
+                model.restore(model_params, cfg)
+            elif model_name == 'sky': 
+                # if '105' in checkpoint_path: 
+                #     checkpoint_path_sky = '/home/ml4u/BKTeam/TheHiep/street_gaussians/street_gaussian_wo_3DOD_mask_dynamic_object_and_pseudo_depth_filter_dynamic_lidar/fine/waymo_exp/waymo_val_105/trained_model/iteration_30000.pth'
+                # elif '150' in checkpoint_path: 
+                #     checkpoint_path_sky = '/home/ml4u/BKTeam/TheHiep/street_gaussians/street_gaussian_wo_3DOD_mask_dynamic_object_and_pseudo_depth_filter_dynamic_lidar/fine/waymo_exp/waymo_val_150/trained_model/iteration_30000.pth'
+                # state_dict_sky = torch.load(checkpoint_path_sky)
+                # model.load_state_dict(state_dict_sky[model_name])
+                model.load_state_dict(state_dict[model_name])
+            else: 
+                model.load_state_dict(state_dict[model_name])
         
         if self.actor_pose is not None:
             self.actor_pose.load_state_dict(state_dict['actor_pose'])
             
         if self.sky_cubemap is not None:
+            # if '105' in checkpoint_path: 
+            #     checkpoint_path_sky = '/media/ml4u/ExtremeSSD/datasets/log/TheHiep/StreetGaussian/output_street_gaussian/waymo_exp/waymo_val_105/trained_model/iteration_30000.pth'
+            # elif '150' in checkpoint_path: 
+            #     checkpoint_path_sky = '/home/ml4u/BKTeam/TheHiep/street_gaussians/street_gaussian_wo_3DOD_mask_dynamic_object_and_pseudo_depth_filter_dynamic_lidar/fine/waymo_exp/waymo_val_150/trained_model/iteration_30000.pth'
+            # state_dict_sky = torch.load(checkpoint_path_sky)
+            # self.sky_cubemap.load_state_dict(state_dict_sky['sky_cubemap'])
             self.sky_cubemap.load_state_dict(state_dict['sky_cubemap'])
             
         if self.color_correction is not None:
@@ -139,9 +195,14 @@ class StreetGaussianModel(nn.Module):
         state_dict = dict()
 
         for model_name in self.model_name_id.keys():
+            if model_name == 'pvg': 
+                continue
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             state_dict[model_name] = model.state_dict(is_final)
         
         if self.actor_pose is not None:
@@ -157,6 +218,11 @@ class StreetGaussianModel(nn.Module):
             state_dict['pose_correction'] = self.pose_correction.save_state_dict(is_final)
       
         return state_dict
+    
+    # def save_deformation(self, path):
+    #     torch.save(self._deformation.state_dict(),os.path.join(path, "deformation.pth"))
+    #     torch.save(self._deformation_table,os.path.join(path, "deformation_table.pth"))
+    #     torch.save(self._deformation_accum,os.path.join(path, "deformation_accum.pth"))
         
     def setup_functions(self):
         obj_tracklets = self.metadata['obj_tracklets']
@@ -170,14 +236,35 @@ class StreetGaussianModel(nn.Module):
         self.obj_info = obj_info
         
         # Build background model
+        if self.include_pvg: 
+            self.background = GaussianModelPVG(
+                    model_name='pvg', 
+                    scene_center=self.metadata['scene_center'],
+                    scene_radius=self.metadata['scene_radius'],
+                    sphere_center=self.metadata['sphere_center'],
+                    sphere_radius=self.metadata['sphere_radius'],
+                )
+            self.model_name_id['pvg'] = 0
+            self.models_num += 1
         if self.include_background:
-            self.background = GaussianModelBkgd(
-                model_name='background', 
-                scene_center=self.metadata['scene_center'],
-                scene_radius=self.metadata['scene_radius'],
-                sphere_center=self.metadata['sphere_center'],
-                sphere_radius=self.metadata['sphere_radius'],
-            )
+            if self.use_deformation_model:
+                self.background = GaussianModelDeformable(
+                    model_name='background', 
+                    scene_center=self.metadata['scene_center'],
+                    scene_radius=self.metadata['scene_radius'],
+                    sphere_center=self.metadata['sphere_center'],
+                    sphere_radius=self.metadata['sphere_radius'],
+                    stage='fine'
+                )
+            else:
+                self.background = GaussianModelBkgd(
+                    model_name='background', 
+                    scene_center=self.metadata['scene_center'],
+                    scene_radius=self.metadata['scene_radius'],
+                    sphere_center=self.metadata['sphere_center'],
+                    sphere_radius=self.metadata['sphere_radius'],
+                    stage='coarse'
+                )
                                     
             self.model_name_id['background'] = 0
             self.models_num += 1
@@ -229,7 +316,7 @@ class StreetGaussianModel(nn.Module):
         self.num_gaussians = 0
 
         # background        
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             num_gaussians_bkgd = self.background.get_xyz.shape[0]
             self.num_gaussians += num_gaussians_bkgd
 
@@ -250,7 +337,7 @@ class StreetGaussianModel(nn.Module):
         self.graph_gaussian_range = dict()
         idx = 0
         
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             num_gaussians_bkgd = self.background.get_xyz.shape[0]
             self.graph_gaussian_range['background'] = [idx, idx+num_gaussians_bkgd-1]
             idx += num_gaussians_bkgd
@@ -296,7 +383,7 @@ class StreetGaussianModel(nn.Module):
     def get_scaling(self):
         scalings = []
         
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             scaling_bkgd = self.background.get_scaling
             scalings.append(scaling_bkgd)
         
@@ -314,7 +401,7 @@ class StreetGaussianModel(nn.Module):
     def get_rotation(self):
         rotations = []
 
-        if self.get_visibility('background'):            
+        if self.get_visibility('background') or self.get_visibility('pvg'):            
             rotations_bkgd = self.background.get_rotation
             if self.use_pose_correction:
                 rotations_bkgd = self.pose_correction.correct_gaussian_rotation(self.viewpoint_camera, rotations_bkgd)            
@@ -340,7 +427,7 @@ class StreetGaussianModel(nn.Module):
     @property
     def get_xyz(self):
         xyzs = []
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             xyz_bkgd = self.background.get_xyz
             if self.use_pose_correction:
                 xyz_bkgd = self.pose_correction.correct_gaussian_xyz(self.viewpoint_camera, xyz_bkgd)
@@ -370,7 +457,7 @@ class StreetGaussianModel(nn.Module):
     def get_features(self):                
         features = []
 
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             features_bkgd = self.background.get_features
             features.append(features_bkgd)            
         
@@ -387,7 +474,7 @@ class StreetGaussianModel(nn.Module):
         colors = []
 
         model_names = []
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             model_names.append('background')
 
         model_names.extend(self.graph_obj_list)
@@ -420,7 +507,7 @@ class StreetGaussianModel(nn.Module):
     @property
     def get_semantic(self):
         semantics = []
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             semantic_bkgd = self.background.get_semantic
             semantics.append(semantic_bkgd)
 
@@ -435,10 +522,19 @@ class StreetGaussianModel(nn.Module):
         return semantics
     
     @property
+    def get_embedding_feats(self):
+        emb_feats = []
+        if self.get_visibility('background') or self.get_visibility('pvg'):
+            emb_feats.append(self.background.get_embedding_feats)
+
+        emb_feats = torch.cat(emb_feats, dim=0)
+        return emb_feats
+    
+    @property
     def get_opacity(self):
         opacities = []
         
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             opacity_bkgd = self.background.get_opacity
             opacities.append(opacity_bkgd)
 
@@ -463,7 +559,7 @@ class StreetGaussianModel(nn.Module):
     def get_normals(self, camera: Camera):
         normals = []
         
-        if self.get_visibility('background'):
+        if self.get_visibility('background') or self.get_visibility('pvg'):
             normals_bkgd = self.background.get_normals(camera)            
             normals.append(normals_bkgd)
             
@@ -487,19 +583,36 @@ class StreetGaussianModel(nn.Module):
         for model_name in self.model_name_id.keys():
             if model_name in exclude_list:
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             model.oneupSHdegree()
                     
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
+        
+    # def training_deformable_nework_setup(self): 
+    #     args = cfg.optim
+    #     self._deformation_accum = torch.zeros((self.get_xyz.shape[0],3),device="cuda")
+    #     l = [
+    #         {'params': list(self._deformation.get_mlp_parameters()), 'lr': args.deformable_gaussian.deformation_lr_init * self.spatial_lr_scale, "name": "deformation"},
+    #         {'params': list(self._deformation.get_grid_parameters()), 'lr': args.deformable_gaussian.training_args.grid_lr_init * self.spatial_lr_scale, "name": "grid"},
+    #     ]
+    #     self.deformation_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
     def training_setup(self, exclude_list=[]):
         self.active_sh_degree = 0
+        # if cfg.model.deformable_gaussian: 
+        #     self.training_deformable_nework_setup()
 
         for model_name in self.model_name_id.keys():
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             model.training_setup()
                 
         if self.actor_pose is not None:
@@ -518,7 +631,10 @@ class StreetGaussianModel(nn.Module):
         for model_name in self.model_name_id.keys():
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             model.update_learning_rate(iteration)
         
         if self.actor_pose is not None:
@@ -537,7 +653,10 @@ class StreetGaussianModel(nn.Module):
         for model_name in self.model_name_id.keys():
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             model.update_optimizer()
 
         if self.actor_pose is not None:
@@ -552,30 +671,44 @@ class StreetGaussianModel(nn.Module):
         if self.pose_correction is not None:
             self.pose_correction.update_optimizer()
 
-    def set_max_radii2D(self, radii, visibility_filter):
-        radii = radii.float()
-        
+    def set_max_radii2D(self, radii, visibility_filter, dynamic_mask = None):
+        radii = radii.float()        
         for model_name in self.graph_gaussian_range.keys():
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             start, end = self.graph_gaussian_range[model_name]
             end += 1
             visibility_model = visibility_filter[start:end]
             max_radii2D_model = radii[start:end]
-            model.max_radii2D[visibility_model] = torch.max(
-                model.max_radii2D[visibility_model], max_radii2D_model[visibility_model])
+            if dynamic_mask is not None: 
+                model.max_radii2D[dynamic_mask][visibility_model] = torch.max(
+                    model.max_radii2D[dynamic_mask][visibility_model], max_radii2D_model[visibility_model])
+            else: 
+                model.max_radii2D[visibility_model] = torch.max(
+                    model.max_radii2D[visibility_model], max_radii2D_model[visibility_model])        
         
-    def add_densification_stats(self, viewspace_point_tensor, visibility_filter):
+    def add_densification_stats(self, viewspace_point_tensor, visibility_filter, dynamic_mask=None):
         viewspace_point_tensor_grad = viewspace_point_tensor.grad
 
         for model_name in self.graph_gaussian_range.keys():
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             start, end = self.graph_gaussian_range[model_name]
             end += 1
             visibility_model = visibility_filter[start:end]
             viewspace_point_tensor_grad_model = viewspace_point_tensor_grad[start:end]
-            model.xyz_gradient_accum[visibility_model, 0:1] += torch.norm(viewspace_point_tensor_grad_model[visibility_model, :2], dim=-1, keepdim=True)
-            model.xyz_gradient_accum[visibility_model, 1:2] += torch.norm(viewspace_point_tensor_grad_model[visibility_model, 2:], dim=-1, keepdim=True)
-            model.denom[visibility_model] += 1
+            if dynamic_mask is not None: 
+                model.xyz_gradient_accum[dynamic_mask][visibility_model, 0:1] += torch.norm(viewspace_point_tensor_grad_model[dynamic_mask][visibility_model, :2], dim=-1, keepdim=True)
+                model.xyz_gradient_accum[dynamic_mask][visibility_model, 1:2] += torch.norm(viewspace_point_tensor_grad_model[dynamic_mask][visibility_model, 2:], dim=-1, keepdim=True)
+                model.denom[dynamic_mask][visibility_model] += 1
+            else: 
+                model.xyz_gradient_accum[visibility_model, 0:1] += torch.norm(viewspace_point_tensor_grad_model[visibility_model, :2], dim=-1, keepdim=True)
+                model.xyz_gradient_accum[visibility_model, 1:2] += torch.norm(viewspace_point_tensor_grad_model[visibility_model, 2:], dim=-1, keepdim=True)
+                model.denom[visibility_model] += 1
         
     def densify_and_prune(self, max_grad, min_opacity, prune_big_points, exclude_list=[]):
         scalars = None
@@ -583,7 +716,10 @@ class StreetGaussianModel(nn.Module):
         for model_name in self.model_name_id.keys():
             if startswith_any(model_name, exclude_list):
                 continue
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
 
             scalars_, tensors_ = model.densify_and_prune(max_grad, min_opacity, prune_big_points)
             if model_name == 'background':
@@ -603,7 +739,10 @@ class StreetGaussianModel(nn.Module):
             
     def reset_opacity(self, exclude_list=[]):
         for model_name in self.model_name_id.keys():
-            model: GaussianModel = getattr(self, model_name)
+            if model_name in ['background', 'pvg']: 
+                model: GaussianModel = getattr(self, 'background')
+            else:
+                model: GaussianModel = getattr(self, model_name)
             if startswith_any(model_name, exclude_list):
                 continue
             model.reset_opacity()

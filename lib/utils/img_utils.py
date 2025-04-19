@@ -6,6 +6,7 @@ import matplotlib.patches as patches
 import numpy as np
 import cv2
 from PIL import Image
+from torchvision import transforms  # Add this import at the top of your file
 
 def save_img_torch(x, name='out.png'):
     x = (x.clamp(0., 1.).detach().cpu().numpy() * 255).astype(np.uint8)
@@ -245,7 +246,10 @@ def visualize_depth_numpy(depth, minmax=None, cmap=cv2.COLORMAP_JET):
     """    
     x = np.nan_to_num(depth) # change nan to 0
     if minmax is None:
-        mi = np.min(x[x>0]) # get minimum positive depth (ignore background)
+        if len(x[x>0]) > 0:
+            mi = np.min(x[x>0]) # get minimum positive depth (ignore background)
+        else: 
+            mi = 0
         ma = np.max(x)
     else:
         mi,ma = minmax
@@ -288,3 +292,45 @@ def draw_3d_box_on_img(vertices, img, color=(255, 128, 128), thickness=1):
     # Draw a cross on the front face to identify front & back.
     for idx1,idx2 in [((1,0,0),(1,1,1)), ((1,1,0),(1,0,1))]:
         cv2.line(img, tuple(vertices[idx1]), tuple(vertices[idx2]), color, thickness)
+
+
+def colorize_mask(mask):
+    assert isinstance(mask, Image.Image)
+    new_mask = mask.convert('P')
+    palette = [128, 64, 128, 244, 35, 232, 70, 70, 70, 102, 102, 156, 190, 153, 153, 153, 153, 153, 250, 170, 30,
+           220, 220, 0, 107, 142, 35, 152, 251, 152, 70, 130, 180, 220, 20, 60, 255, 0, 0, 0, 0, 142, 0, 0, 70,
+           0, 60, 100, 0, 80, 100, 0, 0, 230, 119, 11, 32]
+    zero_pad = 256 * 3 - len(palette)
+    for i in range(zero_pad):
+        palette.append(0)
+    new_mask.putpalette(palette)
+    return new_mask
+
+def visualize_segmentation(prediction_np):
+  image = Image.fromarray(prediction_np)
+
+  col_image = colorize_mask(image)
+  
+  return col_image
+
+def visualize_dx(render_dx):
+    # epsilon = 1e-8
+    # render_dx_normalized = (render_dx - render_dx.min()) / (render_dx.max() - render_dx.min() + epsilon)
+    
+    # render_dx_visual = render_dx_normalized.permute(1, 2, 0).numpy()  # Shape (1066, 1600, 3)
+
+    # render_dx_visual = (render_dx_visual * 255).astype(np.uint8)
+
+    # render_image = Image.fromarray(render_dx_visual)
+
+    # return render_image
+
+    # Remove normalization and keep values equal to 0 unchanged
+    render_dx_visual = render_dx.permute(1, 2, 0).numpy()  # Shape (1066, 1600, 3)
+
+    # Clip values to the range [0, 255] for visualization
+    render_dx_visual = np.clip(abs(render_dx_visual), 0, 255).astype(np.uint8)
+
+    render_image = Image.fromarray(render_dx_visual)
+
+    return render_image

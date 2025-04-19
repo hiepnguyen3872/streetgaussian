@@ -1,0 +1,22 @@
+[
+    {
+        "ref_camera_id": 0,
+        "cameras": [
+            {
+                "camera_id": 0,
+                "image_prefix": "cam_0",
+                "cam_from_rig_rotation": [
+                    1.0,
+                    -1.1930807098404087e-20,
+                    -1.7205356741102976e-20,
+                    2.6418673639754673e-20
+                ],
+                "cam_from_rig_translation": [
+                    0.0,
+                    0.0,
+                    2.220446049250313e-16
+                ]
+            }
+        ]
+    }
+]

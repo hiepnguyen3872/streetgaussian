@@ -28,7 +28,7 @@ conda activate street-gaussian
 pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 torchaudio==0.13.1 --extra-index-url https://download.pytorch.org/whl/cu116
 
 # Install requirements
-pip install -r requirments.txt
+pip install -r requirements.txt
 
 # Install submodules
 pip install ./submodules/diff-gaussian-rasterization
@@ -65,6 +65,7 @@ Generating LiDAR depth
 ```
 python script/waymo/generate_lidar_depth.py --datadir DATA_DIR
 ```
+python script/waymo/generate_lidar_depth.py --datadir '/media/ml4u/ExtremeSSD/datasets/waymo/processed/090'
 
 Generating sky mask
 
@@ -136,3 +137,5 @@ If you find this code useful for your research, please use the following BibTeX 
     year={2024}
 }
 ```
+
+

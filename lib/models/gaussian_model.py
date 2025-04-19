@@ -15,10 +15,11 @@ from lib.utils.camera_utils import Camera
 
 
 class GaussianModel(nn.Module):
-    def __init__(self, model_name='background', num_classes=1):
+    def __init__(self, model_name='background', num_classes=1, stage='coarse'):
         super().__init__()
         cfg_model = cfg.model.gaussian
         self.model_name = model_name
+        self.stage = stage
         
         # semantic
         self.num_classes = num_classes  
@@ -43,12 +44,15 @@ class GaussianModel(nn.Module):
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self._semantic = torch.empty(0)
+        if self.stage == 'fine':
+            self._embedding_feats = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self.embedding_feats_shape = cfg.model.nsg.embedding_feats_shape
         self.setup_functions()
     
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
@@ -67,6 +71,7 @@ class GaussianModel(nn.Module):
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         semamtics = torch.zeros((fused_point_cloud.shape[0], self.num_classes), dtype=torch.float, device="cuda")
+        embedding_feats = torch.zeros((fused_point_cloud.shape[0], self.embedding_feats_shape), dtype=torch.float, device="cuda")
         
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -75,6 +80,8 @@ class GaussianModel(nn.Module):
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self._semantic = nn.Parameter(semamtics.requires_grad_(True))
+        if self.stage == 'fine':
+            self._embedding_feats = nn.Parameter(embedding_feats.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def make_ply(self):
@@ -86,12 +93,19 @@ class GaussianModel(nn.Module):
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
         semantic = self._semantic.detach().cpu().numpy()
+        if self.stage == 'fine':
+            embedding_feats = self._embedding_feats.detach().cpu().numpy()
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, semantic), axis=1)
-        elements[:] = list(map(tuple, attributes))
+        if self.stage == 'fine':
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, semantic, embedding_feats), axis=1)
+        else: 
+            attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, semantic), axis=1)
+        # elements[:] = list(map(tuple, attributes))
+        for i in range(attributes.shape[0]):
+            elements[i] = tuple(attributes[i])
         
         return elements
 
@@ -143,6 +157,12 @@ class GaussianModel(nn.Module):
         semantic = np.zeros((xyz.shape[0], len(semantic_names)))
         for idx, attr_name in enumerate(semantic_names):
             semantic[:, idx] = np.asarray(plydata[attr_name])
+        
+        embedding_feats_names = [p.name for p in plydata.properties if p.name.startswith("embedding_feats_")]
+        embedding_feats_names = sorted(embedding_feats_names, key = lambda x: int(x.split('_')[-1]))
+        embedding_feats = np.zeros((xyz.shape[0], len(embedding_feats_names)))
+        for idx, attr_name in enumerate(embedding_feats_names):
+            embedding_feats[:, idx] = np.asarray(plydata[attr_name])
  
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
         self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
@@ -151,6 +171,8 @@ class GaussianModel(nn.Module):
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
         self._semantic = nn.Parameter(torch.tensor(semantic, dtype=torch.float, device="cuda").requires_grad_(True))
+        if self.stage == 'fine':
+            self._embedding_feats = nn.Parameter(torch.tensor(embedding_feats, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
             
@@ -162,6 +184,8 @@ class GaussianModel(nn.Module):
         self._rotation = state_dict['rotation']
         self._opacity = state_dict['opacity']
         self._semantic = state_dict['semantic']
+        if self.stage == 'fine':
+            self._embedding_feats = state_dict['embedding_feats']
         
         if cfg.mode == 'train':
             self.training_setup()
@@ -189,6 +213,8 @@ class GaussianModel(nn.Module):
             'opacity': self._opacity,
             'semantic': self._semantic,
         }
+        if self.stage == 'fine':
+            state_dict['embedding_feats'] = self._embedding_feats
         
         if not is_final:
             state_dict_extra = {
@@ -247,6 +273,10 @@ class GaussianModel(nn.Module):
             return torch.nn.functional.softmax(self._semantic, dim=1)
     
     @property
+    def get_embedding_feats(self):
+        return self._embedding_feats
+            
+    @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
     
@@ -298,6 +328,8 @@ class GaussianModel(nn.Module):
             {'params': [self._rotation], 'lr': args.rotation_lr, "name": "rotation"},
             {'params': [self._semantic], 'lr': args.semantic_lr, "name": "semantic"},
         ]
+        if self.stage == 'fine':    
+            l.append({'params': [self._embedding_feats], 'lr': args.embedding_feats_lr, "name": "embedding_feats"})
         
         self.percent_dense = args.percent_dense
         self.percent_big_ws = args.percent_big_ws
@@ -338,6 +370,9 @@ class GaussianModel(nn.Module):
             l.append('rot_{}'.format(i))
         for i in range(self._semantic.shape[1]):
             l.append('semantic_{}'.format(i))
+        if self.stage == 'fine':
+            for i in range(self._embedding_feats.shape[1]):
+                l.append('embedding_feats_{}'.format(i))
         return l
 
 
@@ -425,6 +460,8 @@ class GaussianModel(nn.Module):
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._semantic = optimizable_tensors["semantic"]
+        if 'embedding_feats' in optimizable_tensors.keys():
+            self._embedding_feats = optimizable_tensors["_embedding_feats"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.denom = self.denom[valid_points_mask]
@@ -440,6 +477,8 @@ class GaussianModel(nn.Module):
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
         self._semantic = optimizable_tensors["semantic"]
+        if self.stage == 'fine':
+            self._embedding_feats = optimizable_tensors["embedding_feats"]
         
         cat_points_num = self.get_xyz.shape[0] - self.xyz_gradient_accum.shape[0]
         self.xyz_gradient_accum = torch.cat([self.xyz_gradient_accum, torch.zeros(cat_points_num, 2).cuda()], dim=0)
@@ -477,16 +516,30 @@ class GaussianModel(nn.Module):
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
         new_semantic = self._semantic[selected_pts_mask].repeat(N, 1)
+        if self.stage == 'fine':
+            new_embedding_feats = self._embedding_feats[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix({
-            "xyz": new_xyz, 
-            "f_dc": new_features_dc, 
-            "f_rest": new_features_rest, 
-            "opacity": new_opacity, 
-            "scaling" : new_scaling, 
-            "rotation" : new_rotation,
-            "semantic" : new_semantic,
-        })
+            self.densification_postfix({
+                "xyz": new_xyz, 
+                "f_dc": new_features_dc, 
+                "f_rest": new_features_rest, 
+                "opacity": new_opacity, 
+                "scaling" : new_scaling, 
+                "rotation" : new_rotation,
+                "semantic" : new_semantic,
+                "embedding_feats": new_embedding_feats,
+            })
+        
+        else: 
+            self.densification_postfix({
+                "xyz": new_xyz, 
+                "f_dc": new_features_dc, 
+                "f_rest": new_features_rest, 
+                "opacity": new_opacity, 
+                "scaling" : new_scaling, 
+                "rotation" : new_rotation,
+                "semantic" : new_semantic,
+            })
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -508,16 +561,29 @@ class GaussianModel(nn.Module):
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_semantic = self._semantic[selected_pts_mask]
+        if self.stage == 'fine':
+            new_embedding_feats = self._embedding_feats[selected_pts_mask]
 
-        self.densification_postfix({
-            "xyz": new_xyz, 
-            "f_dc": new_features_dc, 
-            "f_rest": new_features_rest, 
-            "opacity": new_opacity, 
-            "scaling" : new_scaling, 
-            "rotation" : new_rotation,
-            "semantic" : new_semantic,
-        })
+            self.densification_postfix({
+                "xyz": new_xyz, 
+                "f_dc": new_features_dc, 
+                "f_rest": new_features_rest, 
+                "opacity": new_opacity, 
+                "scaling" : new_scaling, 
+                "rotation" : new_rotation,
+                "semantic" : new_semantic,
+                "embedding_feats": new_embedding_feats,
+            })
+        else:
+            self.densification_postfix({
+                "xyz": new_xyz, 
+                "f_dc": new_features_dc, 
+                "f_rest": new_features_rest, 
+                "opacity": new_opacity, 
+                "scaling" : new_scaling, 
+                "rotation" : new_rotation,
+                "semantic" : new_semantic,
+            })
         
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum[:, 0:1] / self.denom

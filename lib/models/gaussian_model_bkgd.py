@@ -16,6 +16,7 @@ class GaussianModelBkgd(GaussianModel):
         scene_radius=20,
         sphere_center=np.array([0, 0, 0]),
         sphere_radius=20,
+        stage='fine'
     ):
         self.scene_center = torch.from_numpy(scene_center).float().cuda()
         self.scene_radius = torch.tensor([scene_radius]).float().cuda()
@@ -24,7 +25,7 @@ class GaussianModelBkgd(GaussianModel):
         num_classes = cfg.data.num_classes if cfg.data.get('use_semantic', False) else 0
         self.background_mask = None
 
-        super().__init__(model_name=model_name, num_classes=num_classes)
+        super().__init__(model_name=model_name, num_classes=num_classes, stage=stage)
 
     def create_from_pcd(self, pcd: BasicPointCloud, spatial_lr_scale: float): 
         print('Create background model')

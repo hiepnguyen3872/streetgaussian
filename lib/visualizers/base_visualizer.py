@@ -4,9 +4,8 @@ import cv2
 import torch
 import imageio
 import numpy as np
-
 from lib.utils.camera_utils import Camera
-from lib.utils.img_utils import visualize_depth_numpy
+from lib.utils.img_utils import visualize_depth_numpy, visualize_segmentation, visualize_dx
 from lib.config import cfg
 
 
@@ -25,20 +24,27 @@ class BaseVisualizer():
         self.depth_visualize_func = lambda x: visualize_depth_numpy(x, cmap=cv2.COLORMAP_JET)[0][..., [2, 1, 0]]
         self.diff_visualize_func = lambda x: visualize_depth_numpy(x, cmap=cv2.COLORMAP_TURBO)[0][..., [2, 1, 0]]
 
-    def visualize(self, result, camera: Camera):
+    def visualize(self, result, camera: Camera, viz_seg: bool = False, pseudo_view: bool = False):
         name = camera.image_name
         rgb = result['rgb']
 
         if self.save_image:
             torchvision.utils.save_image(rgb, os.path.join(self.result_dir, f'{name}_rgb.png'))
-            torchvision.utils.save_image(camera.original_image[:3], os.path.join(self.result_dir, f'{name}_gt.png'))
+            if not pseudo_view:
+                torchvision.utils.save_image(camera.original_image[:3], os.path.join(self.result_dir, f'{name}_gt.png'))
      
         if self.save_video:
             rgb = (rgb.detach().cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
             self.rgbs.append(rgb)
-            
-        self.visualize_diff(result, camera)
+        
+        if not pseudo_view:
+            self.visualize_diff(result, camera)
         self.visualize_depth(result, camera)
+        if viz_seg:
+            self.visualize_semantic(result, camera)
+        
+        if cfg.model.deformable.viz_dx: 
+            self.visualize_dx(result, camera)
     
     def visualize_diff(self, result, camera: Camera):
         name = camera.image_name
@@ -74,6 +80,22 @@ class BaseVisualizer():
         
         if self.save_video:
             self.depths.append(depth)
+    
+    def visualize_semantic(self, result, camera: Camera): 
+        name = camera.image_name
+        semantic = result['semantic'].unsqueeze(0)
+
+        semantic_pred = semantic.detach().cpu().numpy().argmax(axis=1).squeeze().astype(np.uint8)
+        semantic_colored = visualize_segmentation(semantic_pred)
+        semantic_colored.save(os.path.join(self.result_dir, f'{name}_semantic.png'))
+    
+    
+    def visualize_dx(self, result, camera: Camera): 
+        name = camera.image_name
+        render_dx = result['render_dx'].detach().cpu()
+        image_render_dx = visualize_dx(render_dx)
+        image_render_dx.save(os.path.join(self.result_dir, f'{name}_dx_new.png'))
+        
         
     def save_video_from_frames(self, frames, name, visualize_func=None):
         if len(frames) == 0:

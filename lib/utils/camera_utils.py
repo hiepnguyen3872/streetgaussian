@@ -11,6 +11,8 @@ from lib.utils.graphics_utils import fov2focal, getProjectionMatrix, getWorld2Vi
 from lib.datasets.base_readers import CameraInfo
 from lib.config import cfg
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from torchvision.transforms import InterpolationMode
+import torch.nn.functional as F
 
 # if training, put everything to cuda
 # image_to_cuda = (cfg.mode == 'train') 
@@ -26,6 +28,8 @@ class Camera(nn.Module):
         scale = 1.0,
         metadata = dict(),
         masks = dict(),
+        raw_time = None,
+        time = None
     ):
         super(Camera, self).__init__()
 
@@ -37,6 +41,8 @@ class Camera(nn.Module):
         self.K = K
         self.image_name = image_name
         self.trans, self.scale = trans, scale
+        self.raw_time = raw_time
+        self.time = time
 
         # meta and mask
         self.meta = metadata
@@ -142,13 +148,16 @@ def loadmask(cam_info: CameraInfo, resolution, resize_mode):
 
 def loadmetadata(metadata, resolution):
     output = copy.deepcopy(metadata)
-
-    
-
     # semantic
     if 'semantic' in metadata:
         output['semantic'] = NumpytoTorch(metadata['semantic'], resolution, resize_mode=Image.NEAREST)
     
+    if 'pseudo_depth' in metadata:
+        output['pseudo_depth'] = NumpytoTorch(metadata['pseudo_depth'], resolution, resize_mode=Image.NEAREST)
+        
+    if 'pseudo_optical_flow' in metadata:
+        output['pseudo_optical_flow'] = F.interpolate(torch.from_numpy(metadata['pseudo_optical_flow']).unsqueeze(0), size=(resolution[1], resolution[0]), mode='bilinear', align_corners=False)
+   
     # lidar_depth
     if 'lidar_depth' in metadata:
         output['lidar_depth'] = NumpytoTorch(metadata['lidar_depth'], resolution, resize_mode=Image.NEAREST)
@@ -185,7 +194,7 @@ def loadCam(cam_info: CameraInfo, resolution_scale):
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
-
+    ()
     K = copy.deepcopy(cam_info.K)
     K[:2] /= scale
 
@@ -204,8 +213,60 @@ def loadCam(cam_info: CameraInfo, resolution_scale):
         masks=masks,
         image_name=cam_info.image_name, 
         metadata=metadata,
+        raw_time = cam_info.raw_time,
+        time = cam_info.time
     )
 
+def loadPseudoCam(cam_info: CameraInfo, resolution_scale):  
+    orig_w, orig_h = cam_info.image.size
+    if cfg.resolution in [1, 2, 4, 8]:
+        scale = resolution_scale * cfg.resolution
+        resolution = round(orig_w / scale), round(orig_h / scale)
+    else:  # should be a type that converts to float
+        if cfg.resolution == -1:
+            if orig_w > 1600:
+                global WARNED
+                if not WARNED:
+                    print("[ INFO ] Encountered quite large input images (>1.6K pixels width), rescaling to 1.6K.\n "
+                        "If this is not desired, please explicitly specify '--resolution/-r' as 1")
+                    WARNED = True
+                global_down = orig_w / 1600
+            else:
+                global_down = 1
+        else:
+            global_down = orig_w / cfg.resolution
+
+        scale = float(global_down) * float(resolution_scale)
+        resolution = (int(orig_w / scale), int(orig_h / scale))
+    ()
+    K = copy.deepcopy(cam_info.K)
+    K[:2] /= scale
+
+    image1 = PILtoTorch(cam_info.image_t1, resolution, resize_mode=Image.BILINEAR)[:3, ...]
+    masks1 = loadmask(cam_info, resolution, resize_mode=Image.NEAREST)
+    
+    image2 = PILtoTorch(cam_info.image_t2, resolution, resize_mode=Image.BILINEAR)[:3, ...]
+    masks2 = loadmask(cam_info, resolution, resize_mode=Image.NEAREST)
+    metadata = loadmetadata(cam_info.metadata, resolution)
+    
+    return PseudoCamera(
+        id=cam_info.uid, 
+        R=cam_info.R, 
+        T=cam_info.T, 
+        FoVx=cam_info.FovX, 
+        FoVy=cam_info.FovY, 
+        K=K,
+        image1=image1, 
+        image2=image2,
+        masks1=masks1,
+        masks2=masks2,
+        image_name=cam_info.image_name, 
+        metadata=metadata,
+        raw_time = cam_info.raw_time,
+        time = cam_info.time
+    )
+    
+    
 def cameraList_from_camInfos(cam_infos, resolution_scale):
     camera_list = []
 
@@ -252,7 +313,7 @@ def make_rasterizer(
     # Set up rasterization configuration
     tanfovx = math.tan(viewpoint_camera.FoVx * 0.5)
     tanfovy = math.tan(viewpoint_camera.FoVy * 0.5)
-
+    
     raster_settings = GaussianRasterizationSettings(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),

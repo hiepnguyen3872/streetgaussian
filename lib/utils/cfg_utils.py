@@ -42,10 +42,13 @@ def parse_cfg(cfg, args):
     if not os.path.exists(cfg.model_path):
         relative_path = os.path.relpath(cfg.model_path, cfg.workspace)
         cfg.model_path = os.path.join(cur_workspace, relative_path)
-
+    
     if os.path.exists(cfg.model_path) and cfg.mode == 'train':
         print('Model path already exists, this would override original model')
         print(f"model_path: {cfg.model_path}")
+    
+    if cfg.task not in cfg.model_path:
+        cfg.model_path = os.path.join(cfg.model_path, cfg.task, cfg.exp_name)
 
     cfg.trained_model_dir = os.path.join(cfg.model_path, 'trained_model')
     cfg.point_cloud_dir = os.path.join(cfg.model_path, 'point_cloud')
@@ -54,7 +57,7 @@ def parse_cfg(cfg, args):
     if not os.path.isabs(cfg.source_path):
         cfg.source_path = os.path.join(cfg.workspace, cfg.source_path)
         cfg.source_path = os.path.normpath(cfg.source_path)
-    
+
     if not os.path.exists(cfg.source_path):
         relative_path = os.path.relpath(cfg.source_path, cfg.workspace)
         cfg.source_path = os.path.join(cur_workspace, relative_path)
@@ -72,6 +75,9 @@ def parse_cfg(cfg, args):
     if not os.path.exists(cfg.record_dir):
         relative_path = os.path.relpath(cfg.record_dir, cfg.workspace)
         cfg.record_dir = os.path.join(cur_workspace, relative_path)
+    
+    else: 
+        cfg.record_dir = os.path.join(cfg.record_dir, 'record', cfg.task, cfg.exp_name)
     
     
 
@@ -93,16 +99,15 @@ def make_cfg(cfg, args):
         cfg_.merge_from_list(args.opts[:index])
     except:
         cfg_.merge_from_list(args.opts)
-
     parse_cfg(cfg_, args)
     return cfg_
 
 
 def save_cfg(cfg, model_dir, epoch=0):
     from contextlib import redirect_stdout
-    os.system('mkdir -p {}'.format(model_dir))
+    os.system("mkdir -p '{}'".format(model_dir))
     cfg_dir = os.path.join(model_dir, 'configs')
-    os.system('mkdir -p {}'.format(cfg_dir))
+    os.system("mkdir -p '{}'".format(cfg_dir))
 
     cfg_path = os.path.join(cfg_dir, f'config_{epoch:06d}.yaml')
     with open(cfg_path, 'w') as f:
